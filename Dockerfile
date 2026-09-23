@@ -1,4 +1,4 @@
-FROM jbarlow83/ocrmypdf-ubuntu:17.12.1
+FROM jbarlow83/ocrmypdf-ubuntu:v17.4.2
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive \
