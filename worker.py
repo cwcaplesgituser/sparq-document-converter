@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import tempfile
 import urllib.parse
+import xml.etree.ElementTree as ET
+from docx import Document
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
@@ -39,10 +41,23 @@ def health():
         versions[name] = output.splitlines()[0] if code == 0 and output else "unavailable"
     return {"status": "healthy", "versions": versions}
 
+def validate_ua2(pdf, root):
+    code, output = run(["/opt/verapdf/verapdf", "--format", "xml", "--flavour", "ua2", str(pdf)], root)
+    try:
+        tree = ET.fromstring(output)
+        results = [element.attrib.get("isCompliant", "").lower() for element in tree.iter() if element.tag.rsplit("}", 1)[-1] == "validationReport"]
+        return code == 0 and results == ["true"], output[-4000:]
+    except ET.ParseError:
+        return False, output[-4000:]
+
+def scanned_pdf(pdf, root):
+    code, output = run(["pdftotext", str(pdf), "-"], root, 90)
+    return code == 0 and len(output.strip()) < 40
+
 @app.post("/convert")
 async def convert(file: UploadFile = File(...), targetFormat: str = Form("pdfua2"), x_worker_api_key: str | None = Header(default=None)):
     authorize(x_worker_api_key)
-    target = targetFormat if targetFormat in {"pdfua2", "pdf", "html", "original"} else "pdfua2"
+    target = targetFormat if targetFormat in {"pdfua2", "pdf", "html", "docx", "original"} else "pdfua2"
     original = pathlib.Path(file.filename or "document").name
     extension = pathlib.Path(original).suffix.lower()
     if extension not in ALLOWED:
@@ -76,7 +91,34 @@ async def convert(file: UploadFile = File(...), targetFormat: str = Form("pdfua2
             if code != 0 or not candidates: raise HTTPException(status_code=422, detail="Office conversion failed")
             pdf = candidates[0]
 
-        if target == "html":
+        if target == "docx":
+            if extension == ".docx":
+                result = source
+                report.append("Original Word document retained.")
+            elif extension == ".pdf" or extension in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}:
+                readable = pdf
+                if scanned_pdf(pdf, root):
+                    ocr_pdf = pathlib.Path(root) / "text-layer.pdf"
+                    code, output = run(["ocrmypdf", "--skip-text", "--rotate-pages", "--deskew", "--output-type", "pdf", str(pdf), str(ocr_pdf)], root)
+                    if code == 0 and ocr_pdf.exists(): readable = ocr_pdf
+                    report.append("Scanned pages received OCR before Word extraction. " + output[-500:])
+                code, text = run(["pdftotext", "-layout", str(readable), "-"], root, 90)
+                if code != 0 or not text.strip(): raise HTTPException(status_code=422, detail="No extractable text for Word output")
+                document = Document()
+                for page in text.split("\f"):
+                    for paragraph in page.splitlines(): document.add_paragraph(paragraph)
+                    if page.strip() and page != text.split("\f")[-1]: document.add_page_break()
+                result = pathlib.Path(root) / "converted.docx"
+                document.save(result)
+                report.append("Word document rebuilt from extracted text; check layout, images, tables, and reading order.")
+            else:
+                code, output = run(["soffice", "--headless", "--convert-to", "docx", "--outdir", root, str(source)], root)
+                candidates = [candidate for candidate in pathlib.Path(root).glob("*.docx") if candidate != source]
+                if code != 0 or not candidates: raise HTTPException(status_code=422, detail="Word conversion failed")
+                result = candidates[0]
+                report.append("LibreOffice Word export: " + output[-600:])
+            media, conformance = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "Word output; human accessibility review required"
+        elif target == "html":
             code, output = run(["soffice", "--headless", "--convert-to", "html", "--outdir", root, str(source)], root)
             candidates = list(pathlib.Path(root).glob("*.html"))
             report.append("HTML export: " + output[-1000:])
@@ -85,16 +127,18 @@ async def convert(file: UploadFile = File(...), targetFormat: str = Form("pdfua2
         elif target == "pdf":
             result, media, conformance = pdf, "application/pdf", "Standard PDF; not PDF/UA certified"
         else:
-            ocr_output = pathlib.Path(root) / "accessible.pdf"
-            code, output = run(["ocrmypdf", "--skip-text", "--rotate-pages", "--deskew", "--clean-final", str(pdf), str(ocr_output)], root)
-            report.append("OCRmyPDF: " + output[-1600:])
-            if code != 0 or not ocr_output.exists():
-                shutil.copy2(pdf, ocr_output)
-                report.append("OCR was not applied; source PDF preserved.")
-            code, validation = run(["/opt/verapdf/verapdf", "--format", "text", "--defaultflavour", "ua2", str(ocr_output)], root)
-            report.append("veraPDF: " + validation[-4000:])
-            passed = code == 0 and "compliant" in validation.lower() and "non-compliant" not in validation.lower()
-            result, media = ocr_output, "application/pdf"
+            passed, validation = validate_ua2(pdf, root)
+            report.append("Original/tagged PDF veraPDF PDF/UA-2 validation: " + validation)
+            result = pdf
+            if not passed and scanned_pdf(pdf, root):
+                ocr_output = pathlib.Path(root) / "accessible.pdf"
+                code, output = run(["ocrmypdf", "--skip-text", "--rotate-pages", "--deskew", "--output-type", "pdf", str(pdf), str(ocr_output)], root)
+                report.append("Scanned-document OCR: " + output[-1200:])
+                if code == 0 and ocr_output.exists():
+                    result = ocr_output
+                    passed, validation = validate_ua2(result, root)
+                    report.append("After OCR veraPDF PDF/UA-2 validation: " + validation)
+            media = "application/pdf"
             conformance = "PDF/UA-2 machine checks passed; human review required" if passed else "Not PDF/UA-2 certified; remediation/review required"
 
     out_name = pathlib.Path(original).stem + ("-accessible" if target == "pdfua2" else "-converted") + result.suffix
