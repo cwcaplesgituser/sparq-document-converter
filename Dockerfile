@@ -23,4 +23,5 @@ COPY worker.py /app/worker.py
 USER app
 WORKDIR /work
 EXPOSE 8080
+ENTRYPOINT []
 CMD ["/opt/worker-venv/bin/python", "-m", "uvicorn", "worker:app", "--app-dir", "/app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
