@@ -1,6 +1,7 @@
 import hmac
 import html
 import difflib
+import json
 import os
 import pathlib
 import shutil
@@ -9,7 +10,6 @@ import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 from docx import Document
-from weasyprint import HTML
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
@@ -70,43 +70,34 @@ def scanned_pdf(pdf, root):
     return code == 0 and len(output.strip()) < 40
 
 def rebuild_text_as_ua2(pdf, original, root):
-    """A clearly reported fallback for documents with extractable text."""
-    code, content = run(["pdftotext", "-layout", str(pdf), "-"], root, 90)
-    if code != 0 or len(content.strip()) < 40 or len(content) > 300_000:
-        return None, "Text rebuild skipped: not enough extractable text or document too large."
-    pages = []
-    title = html.escape(pathlib.Path(original).stem)
-    for page in content.split("\f"):
-        lines = [line.rstrip() for line in page.splitlines()]
-        if not any(line.strip() for line in lines):
-            continue
-        paragraphs = []
-        for line in lines:
-            if line.strip():
-                paragraphs.append("<p>" + html.escape(line) + "</p>")
-        pages.append("<section>" + "".join(paragraphs) + "</section>")
-    if not pages:
-        return None, "Text rebuild skipped: no readable page content."
-    markup = ("<!doctype html><html lang='en'><head><meta charset='utf-8'><title>" + title +
-              "</title><style>@page{size:letter;margin:0.7in}body{font:11pt sans-serif}"
-              "h1{font-size:16pt}p{margin:0 0 0.1em;white-space:pre-wrap;overflow-wrap:anywhere}"
-              "section:not(:last-child){break-after:page}</style></head><body><h1>" + title +
-              "</h1>" + "".join(pages) + "</body></html>")
+    """Rebuild simple PDFs only, then check both conformance and text retention."""
     rebuilt = pathlib.Path(root) / "text-rebuilt-ua2.pdf"
     try:
-        HTML(string=markup, base_url=root).write_pdf(str(rebuilt), pdf_variant="pdf/ua-2")
+        process = subprocess.run(["/opt/worker-venv/bin/python", "/app/pdfua2_rebuild_worker.py",
+                                  str(pdf), str(rebuilt), "--verapdf", "/opt/verapdf/verapdf"],
+                                 cwd=root, capture_output=True, text=True, timeout=300, check=False)
+        code, output = process.returncode, process.stdout
     except Exception as exc:
-        return None, "WeasyPrint PDF/UA-2 rebuild failed: " + str(exc)[:300]
+        return None, "Conservative text rebuild failed: " + str(exc)[:300]
+    try:
+        details = json.loads(output)
+    except ValueError:
+        return None, "Conservative text rebuild failed: " + output[-700:]
+    if code != 0 or details.get("ok") is not True or details.get("compliant") is not True or not rebuilt.is_file():
+        reasons = details.get("reasons") or details.get("failed_rules") or details.get("error") or details.get("message") or details.get("stage")
+        return None, "Conservative text rebuild skipped or failed: " + str(reasons)[:700]
+    # Keep the existing independent validator gate, even after the rebuild worker reports success.
     passed, validation = validate_ua2(rebuilt, root)
     if passed:
+        source_code, content = run(["pdftotext", str(pdf), "-"], root, 90)
         extracted, rebuilt_text = run(["pdftotext", str(rebuilt), "-"], root, 90)
-        original_text = " ".join(content.split())
-        rendered_text = " ".join(rebuilt_text.replace(pathlib.Path(original).stem, "", 1).split())
+        original_text = " ".join(content.split()) if source_code == 0 else ""
+        rendered_text = " ".join(rebuilt_text.split())
         length_ratio = min(len(original_text), len(rendered_text)) / max(len(original_text), len(rendered_text), 1)
-        similarity = (difflib.SequenceMatcher(None, original_text[:5000], rendered_text[:5000], autojunk=False).ratio() * length_ratio) if extracted == 0 else 0
+        similarity = (difflib.SequenceMatcher(None, original_text[:5000], rendered_text[:5000], autojunk=False).ratio() * length_ratio) if extracted == 0 and source_code == 0 else 0
         if similarity < 0.95:
             return None, f"Text rebuild discarded: extracted-text similarity {similarity:.1%} is below the 95% safety threshold."
-        return rebuilt, f"Text-only layout rebuilt with WeasyPrint and passed PDF/UA-2 machine validation; extracted-text similarity {similarity:.1%}. Compare every page with the original; images, tables, and formatting may be missing. " + validation[-800:]
+        return rebuilt, f"Simple text document rebuilt and passed PDF/UA-2 machine validation; extracted-text similarity {similarity:.1%}. Human review of meaning, reading order and appearance remains required. " + validation[-800:]
     return None, "Text rebuild did not pass PDF/UA-2 validation. " + validation[-1000:]
 
 @app.post("/convert")
