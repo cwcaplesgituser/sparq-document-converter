@@ -1,4 +1,5 @@
 import hmac
+import html
 import os
 import pathlib
 import shutil
@@ -7,6 +8,7 @@ import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 from docx import Document
+from weasyprint import HTML
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
@@ -65,6 +67,39 @@ def fix_ua2_metadata(pdf, root):
 def scanned_pdf(pdf, root):
     code, output = run(["pdftotext", str(pdf), "-"], root, 90)
     return code == 0 and len(output.strip()) < 40
+
+def rebuild_text_as_ua2(pdf, original, root):
+    """A clearly reported fallback for documents with extractable text."""
+    code, content = run(["pdftotext", "-layout", str(pdf), "-"], root, 90)
+    if code != 0 or len(content.strip()) < 40 or len(content) > 300_000:
+        return None, "Text rebuild skipped: not enough extractable text or document too large."
+    pages = []
+    title = html.escape(pathlib.Path(original).stem)
+    for page in content.split("\f"):
+        lines = [line.rstrip() for line in page.splitlines()]
+        if not any(line.strip() for line in lines):
+            continue
+        paragraphs = []
+        for line in lines:
+            if line.strip():
+                paragraphs.append("<p>" + html.escape(line) + "</p>")
+        pages.append("<section>" + "".join(paragraphs) + "</section>")
+    if not pages:
+        return None, "Text rebuild skipped: no readable page content."
+    markup = ("<!doctype html><html lang='en'><head><meta charset='utf-8'><title>" + title +
+              "</title><style>@page{size:letter;margin:0.7in}body{font:11pt sans-serif}"
+              "h1{font-size:16pt}p{margin:0 0 0.1em;white-space:pre-wrap;overflow-wrap:anywhere}"
+              "section:not(:last-child){break-after:page}</style></head><body><h1>" + title +
+              "</h1>" + "".join(pages) + "</body></html>")
+    rebuilt = pathlib.Path(root) / "text-rebuilt-ua2.pdf"
+    try:
+        HTML(string=markup, base_url=root).write_pdf(str(rebuilt), pdf_variant="pdf/ua-2")
+    except Exception as exc:
+        return None, "WeasyPrint PDF/UA-2 rebuild failed: " + str(exc)[:300]
+    passed, validation = validate_ua2(rebuilt, root)
+    if passed:
+        return rebuilt, "Text-only layout rebuilt with WeasyPrint and passed PDF/UA-2 machine validation. Compare every page with the original; images, tables, and formatting may be missing. " + validation[-800:]
+    return None, "Text rebuild did not pass PDF/UA-2 validation. " + validation[-1000:]
 
 @app.post("/convert")
 async def convert(file: UploadFile = File(...), targetFormat: str = Form("pdfua2"), x_worker_api_key: str | None = Header(default=None)):
@@ -155,6 +190,11 @@ async def convert(file: UploadFile = File(...), targetFormat: str = Form("pdfua2
                 report.append(diagnostic)
                 if repaired is not None:
                     result, passed = repaired, True
+            if not passed:
+                rebuilt, diagnostic = rebuild_text_as_ua2(result, original, root)
+                report.append(diagnostic)
+                if rebuilt is not None:
+                    result, passed = rebuilt, True
             media = "application/pdf"
             conformance = "PDF/UA-2 machine checks passed; human review required" if passed else "Not PDF/UA-2 certified; remediation/review required"
 
