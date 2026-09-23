@@ -8,9 +8,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libreoffice-writer libreoffice-calc libreoffice-impress \
-      default-jre-headless curl unzip ca-certificates python3-venv \
+      default-jre-headless curl unzip ca-certificates python3-venv poppler-utils \
     && python3 -m venv /opt/worker-venv \
-    && /opt/worker-venv/bin/pip install --no-cache-dir fastapi==0.116.1 uvicorn==0.35.0 python-multipart==0.0.20 \
+    && /opt/worker-venv/bin/pip install --no-cache-dir fastapi==0.116.1 uvicorn==0.35.0 python-multipart==0.0.20 python-docx==1.2.0 \
     && curl -fsSL https://software.verapdf.org/rel/verapdf-installer.zip -o /tmp/verapdf.zip \
     && unzip -q /tmp/verapdf.zip -d /tmp/verapdf-installer \
     && printf '%s\n' '<AutomatedInstallation langpack="eng"><com.izforge.izpack.panels.htmlhello.HTMLHelloPanel id="welcome"/><com.izforge.izpack.panels.target.TargetPanel id="install_dir"><installpath>/opt/verapdf</installpath></com.izforge.izpack.panels.target.TargetPanel><com.izforge.izpack.panels.packs.PacksPanel id="sdk_pack_select"><pack index="0" name="veraPDF GUI" selected="true"/><pack index="1" name="veraPDF Mac and *nix Scripts" selected="true"/><pack index="2" name="veraPDF Validation model" selected="true"/><pack index="3" name="veraPDF Documentation" selected="false"/><pack index="4" name="veraPDF Sample Plugins" selected="false"/></com.izforge.izpack.panels.packs.PacksPanel><com.izforge.izpack.panels.install.InstallPanel id="install"/><com.izforge.izpack.panels.finish.FinishPanel id="finish"/></AutomatedInstallation>' > /tmp/verapdf-auto.xml \
