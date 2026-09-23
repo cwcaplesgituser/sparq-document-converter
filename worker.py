@@ -1,5 +1,6 @@
 import hmac
 import html
+import difflib
 import os
 import pathlib
 import shutil
@@ -98,7 +99,14 @@ def rebuild_text_as_ua2(pdf, original, root):
         return None, "WeasyPrint PDF/UA-2 rebuild failed: " + str(exc)[:300]
     passed, validation = validate_ua2(rebuilt, root)
     if passed:
-        return rebuilt, "Text-only layout rebuilt with WeasyPrint and passed PDF/UA-2 machine validation. Compare every page with the original; images, tables, and formatting may be missing. " + validation[-800:]
+        extracted, rebuilt_text = run(["pdftotext", str(rebuilt), "-"], root, 90)
+        original_text = " ".join(content.split())
+        rendered_text = " ".join(rebuilt_text.replace(pathlib.Path(original).stem, "", 1).split())
+        length_ratio = min(len(original_text), len(rendered_text)) / max(len(original_text), len(rendered_text), 1)
+        similarity = (difflib.SequenceMatcher(None, original_text[:5000], rendered_text[:5000], autojunk=False).ratio() * length_ratio) if extracted == 0 else 0
+        if similarity < 0.95:
+            return None, f"Text rebuild discarded: extracted-text similarity {similarity:.1%} is below the 95% safety threshold."
+        return rebuilt, f"Text-only layout rebuilt with WeasyPrint and passed PDF/UA-2 machine validation; extracted-text similarity {similarity:.1%}. Compare every page with the original; images, tables, and formatting may be missing. " + validation[-800:]
     return None, "Text rebuild did not pass PDF/UA-2 validation. " + validation[-1000:]
 
 @app.post("/convert")
