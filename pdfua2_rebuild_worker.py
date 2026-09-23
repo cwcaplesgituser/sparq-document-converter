@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 try:
-    import fitz  # PyMuPDF
+    import pymupdf as fitz
 except Exception as exc:  # pragma: no cover
     fitz = None
     FITZ_IMPORT_ERROR = exc
@@ -389,6 +389,10 @@ def build_semantic_html(
   h1 {{ font-size: 20pt; margin: 0 0 14pt; line-height: 1.15; }}
   h2 {{ font-size: 16pt; margin: 14pt 0 8pt; line-height: 1.2; }}
   h3 {{ font-size: 13pt; margin: 12pt 0 6pt; line-height: 1.25; }}
+  /* WeasyPrint's default heading bookmarks use page destinations, which
+     fail the PDF/UA-2 structure-destination rule in veraPDF. Keep headings
+     tagged but omit these generated outline entries. */
+  h1, h2, h3 {{ bookmark-level: none; }}
   p {{ margin: 0 0 8pt; orphans: 2; widows: 2; }}
   ul {{ margin: 0 0 8pt 20pt; padding: 0; }}
   li {{ margin: 0 0 3pt; }}
